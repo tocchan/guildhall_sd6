@@ -14,7 +14,7 @@ char const *gPort = "5413";
 
 
 
-class NetworkSystem
+class NetworkSystemOld
 {
    private:
       char const *local_host_name;
@@ -69,7 +69,7 @@ static std::string WindowsErrorAsString( DWORD error_id )
 }
 
 //-------------------------------------------------------------------------------------------------------
-bool NetworkSystem::init() 
+bool NetworkSystemOld::init() 
 {
    WSADATA wsa_data;
    int error = WSAStartup( MAKEWORD(2, 2), &wsa_data );
@@ -83,7 +83,7 @@ bool NetworkSystem::init()
 }
 
 //-------------------------------------------------------------------------------------------------------
-void NetworkSystem::deinit() 
+void NetworkSystemOld::deinit() 
 {
    free((void*) local_host_name);
    local_host_name = nullptr;
@@ -134,7 +134,7 @@ void ListAddressesForHost( char const *host_name, char const *service )
       inet_ntop( iter->ai_family, GetInAddr(iter->ai_addr), addr_name, INET6_ADDRSTRLEN );
       printf( "Address family[%i] type[%i] %s : %s\n", iter->ai_family, iter->ai_socktype, addr_name, service );
    }
-
+                                                         
    freeaddrinfo(addr);
 }
 
@@ -304,9 +304,10 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
 }
 
 //-------------------------------------------------------------------------------------------------------
+/*
 int main( int argc, char const **argv )
 {
-   NetworkSystem net;
+   NetworkSystemOld net;
    if (!net.init()) {
       printf( "Failed to initialize net system.\n" );
       _getch();
@@ -334,4 +335,5 @@ int main( int argc, char const **argv )
    _getch();
    return 0;
 }
+*/
 
