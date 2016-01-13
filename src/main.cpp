@@ -13,8 +13,42 @@
 char const *gPort = "5413";
 
 
+
+class NetworkSystem
+{
+   private:
+      char const *local_host_name;
+
+   public:
+      bool init();
+      void deinit();
+
+      char const* get_local_host_name() const { return local_host_name; }
+};
+
+
 //-------------------------------------------------------------------------------------------------------
-std::string WindowsErrorAsString( DWORD error_id ) 
+static char* AllocLocalHostName()
+{
+   // from docs, 256 is max namelen allowed.
+   char buffer[256];
+   if (SOCKET_ERROR == gethostname( buffer, 256 )) {
+      return nullptr;
+   }
+
+   size_t len = strlen(buffer);
+   if (len == 0) {
+      return nullptr; 
+   }
+
+   char *ret = (char*)malloc(len + 1);
+   memcpy( ret, buffer, len + 1 );
+
+   return ret;
+}
+
+//-------------------------------------------------------------------------------------------------------
+static std::string WindowsErrorAsString( DWORD error_id ) 
 {
    if (error_id != 0) {
       LPSTR buffer;
@@ -35,11 +69,12 @@ std::string WindowsErrorAsString( DWORD error_id )
 }
 
 //-------------------------------------------------------------------------------------------------------
-bool NetworkInit()
+bool NetworkSystem::init() 
 {
    WSADATA wsa_data;
    int error = WSAStartup( MAKEWORD(2, 2), &wsa_data );
    if (error == 0) {
+      local_host_name = AllocLocalHostName();
       return true;
    } else {
       printf( "Failed to initialize WinSock.  Error[%u]: %s\n", error, WindowsErrorAsString(error).c_str() );
@@ -48,14 +83,17 @@ bool NetworkInit()
 }
 
 //-------------------------------------------------------------------------------------------------------
-void NetworkDeinit()
+void NetworkSystem::deinit() 
 {
+   free((void*) local_host_name);
+   local_host_name = nullptr;
+
    WSACleanup();
 }
 
 //-------------------------------------------------------------------------------------------------------
 // get sockaddr, IPv4 or IPv6:
-void* GetInAddr(sockaddr *sa)
+static void* GetInAddr(sockaddr *sa)
 {
     if (sa->sa_family == AF_INET) {
         return &(((sockaddr_in*)sa)->sin_addr);
@@ -64,25 +102,42 @@ void* GetInAddr(sockaddr *sa)
     }
 }
 
-//-------------------------------------------------------------------------------------------------------
-char* AllocHostName()
+// This method of looping through addresses is going to be important for both
+// hosting and connection. 
+void ListAddressesForHost( char const *host_name, char const *service )
 {
-   // from docs, 256 is max namelen allowed.
-   char buffer[256];
-   if (SOCKET_ERROR == gethostname( buffer, 256 )) {
-      return nullptr;
+   addrinfo hints;
+   addrinfo *addr;
+
+   if (nullptr == host_name) {
+      host_name = "localhost";
    }
 
-   size_t len = strlen(buffer);
-   if (len == 0) {
-      return nullptr; 
+   memset( &hints, 0, sizeof(hints) );
+
+   // Which network layer it's using - usually want to UNSPEC, since it doesn't matter.  But since we're hard coding
+   // the client sides connection, we will likely want to use AF_INET when we want to bind an address
+   hints.ai_family = AF_UNSPEC;  
+
+   hints.ai_socktype = SOCK_STREAM; // STREAM based, determines transport layer (TCP)
+   hints.ai_flags = AI_PASSIVE; // used for binding/listening
+
+   int status = getaddrinfo( host_name, service, &hints, &addr );
+   if (status != 0) {
+      printf( "Failed to create socket address: %s\n", gai_strerror(status) );
+      return;
    }
 
-   char *ret = (char*)malloc(len + 1);
-   memcpy( ret, buffer, len + 1 );
+   addrinfo *iter;
+   for (iter = addr; iter != nullptr; iter = iter->ai_next) {
+      char addr_name[INET6_ADDRSTRLEN];
+      inet_ntop( iter->ai_family, GetInAddr(iter->ai_addr), addr_name, INET6_ADDRSTRLEN );
+      printf( "Address family[%i] type[%i] %s : %s\n", iter->ai_family, iter->ai_socktype, addr_name, service );
+   }
 
-   return ret;
+   freeaddrinfo(addr);
 }
+
 
 //-------------------------------------------------------------------------------------------------------
 SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC, int type = SOCK_STREAM )
@@ -137,11 +192,10 @@ SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC,
 
 
 //-------------------------------------------------------------------------------------------------------
-void NetworkHost( char const *port )
+void NetworkHost( char const *host_name, char const *port )
 {
-   char *host_name = AllocHostName();
-   SOCKET host = BindAddress( "localhost", port, AF_INET );
-   free(host_name);
+   SOCKET host = BindAddress( host_name, port, AF_INET );
+
    if (host == INVALID_SOCKET) {
       printf( "Failed to create listen socket.\n" );
       return;
@@ -154,6 +208,12 @@ void NetworkHost( char const *port )
       printf( "Failed to listen.  %i\n", WSAGetLastError() );
       return;
    }
+
+   /*
+   // For setting blocking status
+   u_long non_blocking = 1;
+   ioctlsocket( host, FIONBIO, &non_blocking )
+   */
 
     printf( "Waiting for connections...\n" );
 
@@ -194,7 +254,6 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
    memset( &hints, 0, sizeof(hints) );
    hints.ai_family   = AF_UNSPEC;       // if it matters, us AF_INET for IPv4, and AF_INET6 for IPv6
    hints.ai_socktype = SOCK_STREAM;  
-   hints.ai_flags    = AI_PASSIVE;      // Is used for binding (ie, listening)
 
    // helper method - removes a lot of manual setup or sockaddr construction
    // but will also allocate on the heap on success, so will need to be freed.
@@ -213,7 +272,7 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
          host_sock = socket( iter->ai_family, iter->ai_socktype, iter->ai_protocol );
 
          if (host_sock != INVALID_SOCKET) {
-            if (connect( host_sock, iter->ai_addr, iter->ai_addrlen ) == SOCKET_ERROR) {
+            if (connect( host_sock, iter->ai_addr, (int)iter->ai_addrlen ) == SOCKET_ERROR) {
                closesocket( host_sock );
                host_sock = INVALID_SOCKET;
             } else {
@@ -229,7 +288,7 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
    }
 
    if (host_sock != INVALID_SOCKET) {
-      send( host_sock, msg, strlen(msg), 0 ); 
+      send( host_sock, msg, (int)strlen(msg), 0 ); 
 
       char buffer[128];
       int len = recv( host_sock, buffer, 128, 0 );
@@ -247,30 +306,29 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
 //-------------------------------------------------------------------------------------------------------
 int main( int argc, char const **argv )
 {
-   if (!NetworkInit()) {
+   NetworkSystem net;
+   if (!net.init()) {
       printf( "Failed to initialize net system.\n" );
       _getch();
       return false;
    }
 
-   if (argc > 1) {                                               
-      if (_strcmpi( argv[1], "host" ) == 0) {
-         printf( "Hosting...\n" );
-         NetworkHost( gPort ); 
-      } else if (argc > 2) {
-         char const *addr = argv[1];
-         char const *msg = argv[2];
-         printf( "Sending message \"%s\" to [%s]\n", msg, addr );
-         NetworkJoin( addr, gPort, msg );
-      } else {
-         printf( "Either past \"host\" or \"<addr> <msg>\"\n" );
-      }
+   // List Addresses
+   ListAddressesForHost( net.get_local_host_name(), gPort );
 
+   if ((argc <= 1) || (_strcmpi( argv[1], "host" ) == 0)) {
+      printf( "Hosting...\n" );
+      NetworkHost( net.get_local_host_name(), gPort ); 
+   } else if (argc > 2) {
+      char const *addr = argv[1];
+      char const *msg = argv[2];
+      printf( "Sending message \"%s\" to [%s]\n", msg, addr );
+      NetworkJoin( addr, gPort, msg );
    } else {
-      printf( "Please pass in a name.\n" );
+      printf( "Either past \"host\" or \"<addr> <msg>\"\n" );
    }
 
-   NetworkDeinit();
+   net.deinit();
 
    printf( "Press any key to continue...\n" );
    _getch();
