@@ -10,6 +10,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+//-------------------------------------------------------------------------------------------------------
 std::string WindowsErrorAsString( DWORD error_id ) 
 {
    if (error_id != 0) {
@@ -30,6 +31,7 @@ std::string WindowsErrorAsString( DWORD error_id )
    }
 }
 
+//-------------------------------------------------------------------------------------------------------
 bool NetworkInit()
 {
    WSADATA wsa_data;
@@ -42,11 +44,43 @@ bool NetworkInit()
    }
 }
 
+//-------------------------------------------------------------------------------------------------------
 void NetworkDeinit()
 {
    WSACleanup();
 }
 
+//-------------------------------------------------------------------------------------------------------
+// get sockaddr, IPv4 or IPv6:
+void* GetInAddr(sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET) {
+        return &(((sockaddr_in*)sa)->sin_addr);
+    } else {
+      return &(((sockaddr_in6*)sa)->sin6_addr);
+    }
+}
+
+char* AllocHostName()
+{
+   // from docs, 256 is max namelen allowed.
+   char buffer[256];
+   if (SOCKET_ERROR == gethostname( buffer, 256 )) {
+      return nullptr;
+   }
+
+   size_t len = strlen(buffer);
+   if (len == 0) {
+      return nullptr; 
+   }
+
+   char *ret = (char*)malloc(len + 1);
+   memcpy( ret, buffer, len + 1 );
+
+   return ret;
+}
+
+//-------------------------------------------------------------------------------------------------------
 SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC, int type = SOCK_STREAM )
 {
    SOCKET host_sock = INVALID_SOCKET;
@@ -60,7 +94,7 @@ SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC,
 
    // helper method - removes a lot of manual setup or sockaddr construction
    // but will also allocate on the heap on success, so will need to be freed.
-   int status = getaddrinfo( ip, port, &hints, &addr );
+   int status = getaddrinfo( "localhost", port, &hints, &addr );
    if (status != 0) {
       printf( "Failed to create socket address: %s\n", gai_strerror(status) );
    } else {
@@ -68,15 +102,21 @@ SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC,
       addrinfo *iter;
       
       for (iter = addr; iter != nullptr; iter = iter->ai_next) {
-         host_sock = socket( iter->ai_family, iter->ai_socktype, iter->ai_protocol );
-         if (host_sock != INVALID_SOCKET) {
-            break;
-         }
+         char addr_name[INET6_ADDRSTRLEN];
+         inet_ntop( iter->ai_family, GetInAddr(iter->ai_addr), addr_name, INET6_ADDRSTRLEN );
+         printf( "Attempt to bind on: %s\n", addr_name );
          
+         host_sock = socket( iter->ai_family, iter->ai_socktype, iter->ai_protocol );
+         
+
          if (host_sock != INVALID_SOCKET) {
-            if (bind( host_sock, iter->ai_addr, iter->ai_addrlen ) == SOCKET_ERROR) {
+            if (bind( host_sock, iter->ai_addr, (int)(iter->ai_addrlen) ) == SOCKET_ERROR) {
                closesocket( host_sock );
                host_sock = INVALID_SOCKET;
+            } else {
+               // Connecting on address 
+               printf( "Bound to : %s\n", addr_name );
+               break;
             }
          }
       }
@@ -88,9 +128,12 @@ SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC,
    return host_sock;
 }
 
+//-------------------------------------------------------------------------------------------------------
 void NetworkHost()
 {
-   SOCKET host = BindAddress( nullptr, "3490" );
+   char *host_name = AllocHostName();
+   SOCKET host = BindAddress( host_name, "3490", AF_INET );
+   free(host_name);
    if (host == INVALID_SOCKET) {
       printf( "Failed to create listen socket.\n" );
       return;
@@ -100,7 +143,7 @@ void NetworkHost()
    int backlog_count = 8; // max number of connections to queue up
    if (listen( host, backlog_count ) == SOCKET_ERROR) {
       closesocket(host);
-      printf( "Failed to listen.\n" );
+      printf( "Failed to listen.  %i\n", WSAGetLastError() );
       return;
    }
 
@@ -132,10 +175,12 @@ void NetworkHost()
     }
 }
 
+//-------------------------------------------------------------------------------------------------------
 void NetworkJoin( char const *buf )
 {
 }
 
+//-------------------------------------------------------------------------------------------------------
 int main( int argc, char const **argv )
 {
    if (!NetworkInit()) {
