@@ -33,3 +33,4 @@ src/Release
 *.opendb
 *.db
 src/x64/
+*.sdf
