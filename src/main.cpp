@@ -12,8 +12,6 @@
 
 char const *gPort = "5413";
 
-
-
 class NetworkSystemOld
 {
    private:
@@ -102,90 +100,163 @@ static void* GetInAddr(sockaddr *sa)
     }
 }
 
+addrinfo* AllocAddressesForHost( char const *host, 
+   char const *service,
+   int family,
+   int socktype, 
+   bool binding )
+{
+   addrinfo hints;
+   addrinfo *addr;
+
+   if (nullptr == host) {
+      host = "localhost";
+   }
+
+   memset(&hints, 0, sizeof(hints));
+
+   // Which network layer it's using - usually want to UNSPEC, since it doesn't matter.  But since we're hard coding
+   // the client sides connection, we will likely want to use AF_INET when we want to bind an address
+   hints.ai_family = family;
+
+   hints.ai_socktype = socktype; // STREAM based, determines transport layer (TCP)
+   hints.ai_flags = binding ? AI_PASSIVE : 0; // used for binding/listening
+
+   int status = getaddrinfo(host, service, &hints, &addr);
+   if (status != 0) {
+      printf("Failed to find addresses for [%s:%s]: %s\n", host, service, gai_strerror(status));
+      return nullptr;
+   }
+
+   return addr;
+}
+
+//-------------------------------------------------------------------------------------------------------
+void FreeAddresses( addrinfo *addresses )
+{
+   freeaddrinfo(addresses);
+}
+
+//-------------------------------------------------------------------------------------------------------
+typedef bool (*address_work_cb)( addrinfo*, void *user_arg );
+
+//-------------------------------------------------------------------------------------------------------
+static void ForEachAddress( addrinfo *addresses, address_work_cb cb, void *user_arg )
+{
+   addrinfo *iter = addresses;
+   while (nullptr != iter) {
+      if (cb( iter, user_arg )) {
+         break;
+      }
+
+      iter = iter->ai_next;
+   }
+}
+
+//-------------------------------------------------------------------------------------------------------
+static size_t GetAddressName( char *buffer, size_t const buffer_size, addrinfo *addr )
+{
+   char addr_name[INET6_ADDRSTRLEN];
+   memset(addr_name, 0, sizeof(addr_name));
+   inet_ntop(addr->ai_family, GetInAddr(addr->ai_addr), addr_name, INET6_ADDRSTRLEN);
+
+   size_t len = min( buffer_size - 1, strlen(addr_name) );
+   memcpy( buffer, addr_name, len );
+   buffer[len] = NULL;
+   return len;
+}
+
+//-------------------------------------------------------------------------------------------------------
+bool PrintAddress( addrinfo *addr, void* )
+{
+   char addr_name[INET6_ADDRSTRLEN];
+   GetAddressName( addr_name, INET6_ADDRSTRLEN, addr );
+   printf("Address family[%i] type[%i] %s\n", addr->ai_family, addr->ai_socktype, addr_name );
+
+   return false;
+}
+
+//-------------------------------------------------------------------------------------------------------
 // This method of looping through addresses is going to be important for both
 // hosting and connection. 
 void ListAddressesForHost( char const *host_name, char const *service )
 {
-   addrinfo hints;
-   addrinfo *addr;
-
-   if (nullptr == host_name) {
-      host_name = "localhost";
-   }
-
-   memset( &hints, 0, sizeof(hints) );
-
-   // Which network layer it's using - usually want to UNSPEC, since it doesn't matter.  But since we're hard coding
-   // the client sides connection, we will likely want to use AF_INET when we want to bind an address
-   hints.ai_family = AF_UNSPEC;  
-
-   hints.ai_socktype = SOCK_STREAM; // STREAM based, determines transport layer (TCP)
-   hints.ai_flags = AI_PASSIVE; // used for binding/listening
-
-   int status = getaddrinfo( host_name, service, &hints, &addr );
-   if (status != 0) {
-      printf( "Failed to create socket address: %s\n", gai_strerror(status) );
-      return;
-   }
-
-   addrinfo *iter;
-   for (iter = addr; iter != nullptr; iter = iter->ai_next) {
-      char addr_name[INET6_ADDRSTRLEN];
-      inet_ntop( iter->ai_family, GetInAddr(iter->ai_addr), addr_name, INET6_ADDRSTRLEN );
-      printf( "Address family[%i] type[%i] %s : %s\n", iter->ai_family, iter->ai_socktype, addr_name, service );
-   }
-                                                         
+   addrinfo *addr = AllocAddressesForHost( host_name, service, AF_UNSPEC, SOCK_STREAM, true );
+   ForEachAddress( addr, PrintAddress, nullptr );
    freeaddrinfo(addr);
 }
 
+//-------------------------------------------------------------------------------------------------------
+bool TryToBind( addrinfo *addr, void *sock_ptr )
+{
+   SOCKET *sock = (SOCKET*)sock_ptr;
+
+   SOCKET host_sock = INVALID_SOCKET;
+   char addr_name[INET6_ADDRSTRLEN];
+   GetAddressName( addr_name, INET6_ADDRSTRLEN, addr );
+   printf("Attempt to bind on: %s\n", addr_name);
+
+   host_sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+
+   if (host_sock != INVALID_SOCKET) {
+      if (bind(host_sock, addr->ai_addr, (int)(addr->ai_addrlen)) == SOCKET_ERROR) {
+         closesocket(host_sock);
+         host_sock = INVALID_SOCKET;
+         return false;
+      }
+      else {
+         // Connecting on address 
+         printf("Bound to : %s\n", addr_name);
+         *sock = host_sock;
+         return true;
+      }
+   } else {
+      printf( "Failed to create socket?!\n" );
+   }
+
+   return false;
+}
 
 //-------------------------------------------------------------------------------------------------------
-SOCKET BindAddress( char const *ip, char const *port, int af_family = AF_UNSPEC, int type = SOCK_STREAM )
+bool TryToConnect(addrinfo *addr, void *sock_ptr)
+{
+   SOCKET *sock = (SOCKET*)sock_ptr;
+
+   SOCKET host_sock = INVALID_SOCKET;
+   char addr_name[INET6_ADDRSTRLEN];
+   GetAddressName(addr_name, INET6_ADDRSTRLEN, addr);
+   printf("Attempt to connect to: %s\n", addr_name);
+
+   host_sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+
+   if (host_sock != INVALID_SOCKET) {
+      if (connect(host_sock, addr->ai_addr, (int)(addr->ai_addrlen)) == SOCKET_ERROR) {
+         closesocket(host_sock);
+         host_sock = INVALID_SOCKET;
+         return false;
+      }
+      else {
+         // Connecting on address 
+         printf("Connected to : %s\n", addr_name);
+         *sock = host_sock;
+         return true;
+      }
+   }
+   else {
+      printf("Failed to create socket?!\n");
+   }
+
+   return false;
+}
+
+//-------------------------------------------------------------------------------------------------------
+SOCKET BindAddress( char const *ip, char const *port, int family = AF_UNSPEC, int type = SOCK_STREAM )
 {
    SOCKET host_sock = INVALID_SOCKET;
-   addrinfo hints;
-   addrinfo *addr;
 
-   if (ip == nullptr) {
-      ip = "localhost";
-   }
-
-   memset( &hints, 0, sizeof(hints) );
-   hints.ai_family   = af_family;       // if it matters, us AF_INET for IPv4, and AF_INET6 for IPv6
-   hints.ai_socktype = type;
-   hints.ai_flags    = AI_PASSIVE;      // Is used for binding (ie, listening)
-
-   // helper method - removes a lot of manual setup or sockaddr construction
-   // but will also allocate on the heap on success, so will need to be freed.
-   int status = getaddrinfo( ip, port, &hints, &addr );
-   if (status != 0) {
-      printf( "Failed to create socket address: %s\n", gai_strerror(status) );
-   } else {
-      // Alright, walk the list, and bind when able
-      addrinfo *iter;
-      
-      for (iter = addr; iter != nullptr; iter = iter->ai_next) {
-         char addr_name[INET6_ADDRSTRLEN];
-         inet_ntop( iter->ai_family, GetInAddr(iter->ai_addr), addr_name, INET6_ADDRSTRLEN );
-         printf( "Attempt to bind on: %s : %s\n", addr_name, port );
-         
-         host_sock = socket( iter->ai_family, iter->ai_socktype, iter->ai_protocol );
-
-         if (host_sock != INVALID_SOCKET) {
-            if (bind( host_sock, iter->ai_addr, (int)(iter->ai_addrlen) ) == SOCKET_ERROR) {
-               closesocket( host_sock );
-               host_sock = INVALID_SOCKET;
-            } else {
-               // Connecting on address 
-               printf( "Bound to : %s\n", addr_name );
-               break;
-            }
-         }
-      }
-
-      // We're dont with the address, clean up my memory
-      freeaddrinfo(addr);
-   }
+   addrinfo *addr = AllocAddressesForHost( ip, port, family, type, true ); 
+   ForEachAddress( addr, TryToBind, &host_sock );
+   FreeAddresses(addr);
 
    return host_sock;
 }
@@ -248,44 +319,11 @@ void NetworkHost( char const *host_name, char const *port )
 void NetworkJoin( char const *addrname, char const *port, char const *msg )
 {
    SOCKET host_sock = INVALID_SOCKET;
-   addrinfo hints;
-   addrinfo *addr;
-       
-   memset( &hints, 0, sizeof(hints) );
-   hints.ai_family   = AF_UNSPEC;       // if it matters, us AF_INET for IPv4, and AF_INET6 for IPv6
-   hints.ai_socktype = SOCK_STREAM;  
 
-   // helper method - removes a lot of manual setup or sockaddr construction
-   // but will also allocate on the heap on success, so will need to be freed.
-   int status = getaddrinfo( addrname, port, &hints, &addr );
-   if (status != 0) {
-      printf( "Failed to create socket address: %s\n", gai_strerror(status) );
-   } else {
-      // Alright, walk the list, and bind when able
-      addrinfo *iter;
-      
-      for (iter = addr; iter != nullptr; iter = iter->ai_next) {
-         char addr_name[INET6_ADDRSTRLEN];
-         inet_ntop( iter->ai_family, GetInAddr(iter->ai_addr), addr_name, INET6_ADDRSTRLEN );
-         printf( "Attempt to bind on: %s\n", addr_name );
-         
-         host_sock = socket( iter->ai_family, iter->ai_socktype, iter->ai_protocol );
+   addrinfo *addr = AllocAddressesForHost( addrname, port, AF_UNSPEC, SOCK_STREAM, false );
+   ForEachAddress( addr, TryToConnect, &host_sock );
+   FreeAddresses(addr);
 
-         if (host_sock != INVALID_SOCKET) {
-            if (connect( host_sock, iter->ai_addr, (int)iter->ai_addrlen ) == SOCKET_ERROR) {
-               closesocket( host_sock );
-               host_sock = INVALID_SOCKET;
-            } else {
-               // Connecting on address 
-               printf( "Connected to : %s\n", addr_name );
-               break;
-            }
-         }
-      }
-
-      // We're dont with the address, clean up my memory
-      freeaddrinfo(addr);
-   }
 
    if (host_sock != INVALID_SOCKET) {
       send( host_sock, msg, (int)strlen(msg), 0 ); 
@@ -304,7 +342,6 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
 }
 
 //-------------------------------------------------------------------------------------------------------
-/*
 int main( int argc, char const **argv )
 {
    NetworkSystemOld net;
@@ -319,7 +356,7 @@ int main( int argc, char const **argv )
 
    if ((argc <= 1) || (_strcmpi( argv[1], "host" ) == 0)) {
       printf( "Hosting...\n" );
-      NetworkHost( net.get_local_host_name(), gPort ); 
+      NetworkHost( "localhost", gPort ); 
    } else if (argc > 2) {
       char const *addr = argv[1];
       char const *msg = argv[2];
@@ -335,5 +372,4 @@ int main( int argc, char const **argv )
    _getch();
    return 0;
 }
-*/
 
