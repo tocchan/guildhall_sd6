@@ -5,45 +5,12 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
-#include <WinSock2.h>
-#include <WS2tcpip.h>
 
-#pragma comment(lib, "ws2_32.lib")
+#include "net/net.h"
+#include "net/addr.h"
 
 char const *gPort = "5413";
 
-class NetworkSystemOld
-{
-   private:
-      char const *local_host_name;
-
-   public:
-      bool init();
-      void deinit();
-
-      char const* get_local_host_name() const { return local_host_name; }
-};
-
-
-//-------------------------------------------------------------------------------------------------------
-static char* AllocLocalHostName()
-{
-   // from docs, 256 is max namelen allowed.
-   char buffer[256];
-   if (SOCKET_ERROR == gethostname( buffer, 256 )) {
-      return nullptr;
-   }
-
-   size_t len = strlen(buffer);
-   if (len == 0) {
-      return nullptr; 
-   }
-
-   char *ret = (char*)malloc(len + 1);
-   memcpy( ret, buffer, len + 1 );
-
-   return ret;
-}
 
 //-------------------------------------------------------------------------------------------------------
 static std::string WindowsErrorAsString( DWORD error_id ) 
@@ -67,107 +34,7 @@ static std::string WindowsErrorAsString( DWORD error_id )
 }
 
 //-------------------------------------------------------------------------------------------------------
-bool NetworkSystemOld::init() 
-{
-   WSADATA wsa_data;
-   int error = WSAStartup( MAKEWORD(2, 2), &wsa_data );
-   if (error == 0) {
-      local_host_name = AllocLocalHostName();
-      return true;
-   } else {
-      printf( "Failed to initialize WinSock.  Error[%u]: %s\n", error, WindowsErrorAsString(error).c_str() );
-      return false;
-   }
-}
-
-//-------------------------------------------------------------------------------------------------------
-void NetworkSystemOld::deinit() 
-{
-   free((void*) local_host_name);
-   local_host_name = nullptr;
-
-   WSACleanup();
-}
-
-//-------------------------------------------------------------------------------------------------------
-// get sockaddr, IPv4 or IPv6:
-static void* GetInAddr(sockaddr *sa)
-{
-    if (sa->sa_family == AF_INET) {
-        return &(((sockaddr_in*)sa)->sin_addr);
-    } else {
-      return &(((sockaddr_in6*)sa)->sin6_addr);
-    }
-}
-
-addrinfo* AllocAddressesForHost( char const *host, 
-   char const *service,
-   int family,
-   int socktype, 
-   bool binding )
-{
-   addrinfo hints;
-   addrinfo *addr;
-
-   if (nullptr == host) {
-      host = "localhost";
-   }
-
-   memset(&hints, 0, sizeof(hints));
-
-   // Which network layer it's using - usually want to UNSPEC, since it doesn't matter.  But since we're hard coding
-   // the client sides connection, we will likely want to use AF_INET when we want to bind an address
-   hints.ai_family = family;
-
-   hints.ai_socktype = socktype; // STREAM based, determines transport layer (TCP)
-   hints.ai_flags = binding ? AI_PASSIVE : 0; // used for binding/listening
-
-   int status = getaddrinfo(host, service, &hints, &addr);
-   if (status != 0) {
-      printf("Failed to find addresses for [%s:%s]: %s\n", host, service, gai_strerror(status));
-      return nullptr;
-   }
-
-   return addr;
-}
-
-//-------------------------------------------------------------------------------------------------------
-void FreeAddresses( addrinfo *addresses )
-{
-   freeaddrinfo(addresses);
-}
-
-//-------------------------------------------------------------------------------------------------------
-typedef bool (*address_work_cb)( addrinfo*, void *user_arg );
-
-//-------------------------------------------------------------------------------------------------------
-static void ForEachAddress( addrinfo *addresses, address_work_cb cb, void *user_arg )
-{
-   addrinfo *iter = addresses;
-   while (nullptr != iter) {
-      if (cb( iter, user_arg )) {
-         break;
-      }
-
-      iter = iter->ai_next;
-   }
-}
-
-//-------------------------------------------------------------------------------------------------------
-static size_t GetAddressName( char *buffer, size_t const buffer_size, addrinfo *addr )
-{
-   char addr_name[INET6_ADDRSTRLEN];
-   memset(addr_name, 0, sizeof(addr_name));
-   inet_ntop(addr->ai_family, GetInAddr(addr->ai_addr), addr_name, INET6_ADDRSTRLEN);
-
-   size_t len = min( buffer_size - 1, strlen(addr_name) );
-   memcpy( buffer, addr_name, len );
-   buffer[len] = NULL;
-   return len;
-}
-
-//-------------------------------------------------------------------------------------------------------
-bool PrintAddress( addrinfo *addr, void* )
+static bool PrintAddress( addrinfo *addr, void* )
 {
    char addr_name[INET6_ADDRSTRLEN];
    GetAddressName( addr_name, INET6_ADDRSTRLEN, addr );
@@ -179,7 +46,7 @@ bool PrintAddress( addrinfo *addr, void* )
 //-------------------------------------------------------------------------------------------------------
 // This method of looping through addresses is going to be important for both
 // hosting and connection. 
-void ListAddressesForHost( char const *host_name, char const *service )
+static void ListAddressesForHost( char const *host_name, char const *service )
 {
    addrinfo *addr = AllocAddressesForHost( host_name, service, AF_UNSPEC, SOCK_STREAM, true );
    ForEachAddress( addr, PrintAddress, nullptr );
@@ -187,7 +54,7 @@ void ListAddressesForHost( char const *host_name, char const *service )
 }
 
 //-------------------------------------------------------------------------------------------------------
-bool TryToBind( addrinfo *addr, void *sock_ptr )
+static bool TryToBind( addrinfo *addr, void *sock_ptr )
 {
    SOCKET *sock = (SOCKET*)sock_ptr;
 
@@ -218,7 +85,7 @@ bool TryToBind( addrinfo *addr, void *sock_ptr )
 }
 
 //-------------------------------------------------------------------------------------------------------
-bool TryToConnect(addrinfo *addr, void *sock_ptr)
+static bool TryToConnect(addrinfo *addr, void *sock_ptr)
 {
    SOCKET *sock = (SOCKET*)sock_ptr;
 
@@ -250,7 +117,7 @@ bool TryToConnect(addrinfo *addr, void *sock_ptr)
 }
 
 //-------------------------------------------------------------------------------------------------------
-SOCKET BindAddress( char const *ip, char const *port, int family = AF_UNSPEC, int type = SOCK_STREAM )
+static SOCKET BindAddress( char const *ip, char const *port, int family = AF_UNSPEC, int type = SOCK_STREAM )
 {
    SOCKET host_sock = INVALID_SOCKET;
 
@@ -263,7 +130,7 @@ SOCKET BindAddress( char const *ip, char const *port, int family = AF_UNSPEC, in
 
 
 //-------------------------------------------------------------------------------------------------------
-void NetworkHost( char const *host_name, char const *port )
+static void NetworkHost( char const *host_name, char const *port )
 {
    SOCKET host = BindAddress( host_name, port, AF_INET );
 
@@ -316,7 +183,7 @@ void NetworkHost( char const *host_name, char const *port )
 }
 
 //-------------------------------------------------------------------------------------------------------
-void NetworkJoin( char const *addrname, char const *port, char const *msg )
+static void NetworkJoin( char const *addrname, char const *port, char const *msg )
 {
    SOCKET host_sock = INVALID_SOCKET;
 
@@ -344,16 +211,18 @@ void NetworkJoin( char const *addrname, char const *port, char const *msg )
 //-------------------------------------------------------------------------------------------------------
 int main( int argc, char const **argv )
 {
-   NetworkSystemOld net;
-   if (!net.init()) {
+   if (!NetSystemInit()) {
       printf( "Failed to initialize net system.\n" );
       _getch();
       return false;
    }
 
    // List Addresses
-   ListAddressesForHost( net.get_local_host_name(), gPort );
+   char const *hostname = AllocLocalHostName();
+   ListAddressesForHost( hostname, gPort );
+   FreeLocalHostName(hostname);
 
+   // Host/Client Logic
    if ((argc <= 1) || (_strcmpi( argv[1], "host" ) == 0)) {
       printf( "Hosting...\n" );
       NetworkHost( "localhost", gPort ); 
@@ -366,7 +235,7 @@ int main( int argc, char const **argv )
       printf( "Either past \"host\" or \"<addr> <msg>\"\n" );
    }
 
-   net.deinit();
+   NetSystemDeinit();
 
    printf( "Press any key to continue...\n" );
    _getch();
