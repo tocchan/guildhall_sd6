@@ -15,7 +15,8 @@ addrinfo* AllocAddressesForHost(char const *host,
 
 void FreeAddresses(addrinfo *addresses);
 
-size_t GetAddressName(char *buffer, size_t const buffer_size, addrinfo *addr);
+uint16_t GetAddressPort(sockaddr const *addr);
+size_t GetAddressName(char *buffer, size_t const buffer_size, sockaddr const *sa);
 
 void ForEachAddress(addrinfo *addresses, address_work_cb cb, void *user_arg);
 

@@ -1,9 +1,11 @@
 #include "net/addr.h"
 
+#include <stdio.h>
+
 // INTERNAL FUNCTIONS //////////////////////////////////////////////////////////////
 //-------------------------------------------------------------------------------------------------------
 // get sockaddr, IPv4 or IPv6:
-static void* GetInAddr(sockaddr *sa)
+static void* GetInAddr(sockaddr const *sa)
 {
    if (sa->sa_family == AF_INET) {
       return &(((sockaddr_in*)sa)->sin_addr);
@@ -52,16 +54,30 @@ void FreeAddresses(addrinfo *addresses)
 }
 
 //-------------------------------------------------------------------------------------------------------
-size_t GetAddressName(char *buffer, size_t const buffer_size, addrinfo *addr)
+uint16_t GetAddressPort(sockaddr const *sa)
+{
+   USHORT port = 0;
+   if (sa->sa_family == AF_INET) {
+      port = (((sockaddr_in*)sa)->sin_port);
+   }
+   else {
+      port = (((sockaddr_in6*)sa)->sin6_port);
+   }
+
+   return ntohs(port);
+}
+
+//-------------------------------------------------------------------------------------------------------
+size_t GetAddressName(char *buffer, size_t const buffer_size, sockaddr const *sa)
 {
    char addr_name[INET6_ADDRSTRLEN];
    memset(addr_name, 0, sizeof(addr_name));
-   inet_ntop(addr->ai_family, GetInAddr(addr->ai_addr), addr_name, INET6_ADDRSTRLEN);
+   inet_ntop(sa->sa_family, GetInAddr(sa), addr_name, INET6_ADDRSTRLEN);
 
+   uint16_t port = GetAddressPort(sa);
+   
    size_t len = min(buffer_size - 1, strlen(addr_name));
-   memcpy(buffer, addr_name, len);
-   buffer[len] = NULL;
-   return len;
+   return sprintf_s( buffer, buffer_size, "%s:%i", addr_name, port );
 }
 
 //-------------------------------------------------------------------------------------------------------

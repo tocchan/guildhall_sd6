@@ -9,7 +9,8 @@
 #include "net/net.h"
 #include "net/addr.h"
 
-char const *gPort = "5413";
+char const *gHostPort = "5413";
+char const *gClientPort = "5414";
 
 
 //-------------------------------------------------------------------------------------------------------
@@ -37,7 +38,7 @@ static std::string WindowsErrorAsString( DWORD error_id )
 static bool PrintAddress( addrinfo *addr, void* )
 {
    char addr_name[INET6_ADDRSTRLEN];
-   GetAddressName( addr_name, INET6_ADDRSTRLEN, addr );
+   GetAddressName( addr_name, INET6_ADDRSTRLEN, addr->ai_addr );
    printf("Address family[%i] type[%i] %s\n", addr->ai_family, addr->ai_socktype, addr_name );
 
    return false;
@@ -60,7 +61,7 @@ static bool TryToBind( addrinfo *addr, void *sock_ptr )
 
    SOCKET host_sock = INVALID_SOCKET;
    char addr_name[INET6_ADDRSTRLEN];
-   GetAddressName( addr_name, INET6_ADDRSTRLEN, addr );
+   GetAddressName( addr_name, INET6_ADDRSTRLEN, addr->ai_addr );
    printf("Attempt to bind on: %s\n", addr_name);
 
    host_sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
@@ -91,7 +92,7 @@ static bool TryToConnect(addrinfo *addr, void *sock_ptr)
 
    SOCKET host_sock = INVALID_SOCKET;
    char addr_name[INET6_ADDRSTRLEN];
-   GetAddressName(addr_name, INET6_ADDRSTRLEN, addr);
+   GetAddressName(addr_name, INET6_ADDRSTRLEN, addr->ai_addr);
    printf("Attempt to connect to: %s\n", addr_name);
 
    host_sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
@@ -130,82 +131,94 @@ static SOCKET BindAddress( char const *ip, char const *port, int family = AF_UNS
 
 
 //-------------------------------------------------------------------------------------------------------
-static void NetworkHost( char const *host_name, char const *port )
+static void NetworkHost( char const *port )
 {
-   SOCKET host = BindAddress( host_name, port, AF_INET );
+   char const *host_name = AllocLocalHostName();
+   SOCKET sock = BindAddress( host_name, port, AF_INET, SOCK_DGRAM );
+   FreeLocalHostName(host_name);
 
-   if (host == INVALID_SOCKET) {
+   if (sock == INVALID_SOCKET) {
       printf( "Failed to create listen socket.\n" );
       return;
    }
 
-   // Now listen for incoming connections
-   int backlog_count = 8; // max number of connections to queue up
-   if (listen( host, backlog_count ) == SOCKET_ERROR) {
-      closesocket(host);
-      printf( "Failed to listen.  %i\n", WSAGetLastError() );
-      return;
-   }
+   // Don't need to listen for DGRAM sockets
 
    /*
    // For setting blocking status
    u_long non_blocking = 1;
-   ioctlsocket( host, FIONBIO, &non_blocking )
+   ioctlsocket( sock, FIONBIO, &non_blocking )
    */
 
-    printf( "Waiting for connections...\n" );
+    printf( "Waiting for messages...\n" );
 
     sockaddr_storage their_addr;
-    SOCKET sock_them;
     char buffer[2048];
 
     for (;;) {
       int addr_size = sizeof(their_addr);
-      sock_them = accept( host, (sockaddr*)&their_addr, &addr_size );
+      int recvd = recvfrom( sock, buffer, 2048, 0, (sockaddr*)&their_addr, &addr_size );
 
-      if (sock_them == SOCKET_ERROR) {
-         int const error = WSAGetLastError();
-         if (error == WSAEWOULDBLOCK) {
-            // happens when no connection is available and we would normally block, it's harmless
-         } else {
-            // failed to get a socket?
-            printf( "Failed to accept: [%i] %s", error, WindowsErrorAsString(error).c_str() );
-         }
+      char from_name[128];
+      GetAddressName( from_name, 128, (sockaddr*)&their_addr );
+
+      if (recvd > 0) {
+         buffer[recvd] = NULL;
+         printf( "Received Message[%s] from %s\n", buffer, from_name );
       } else {
-         printf( "Got a connection!\n" );
-         int len = recv( sock_them, buffer, 2048, 0 );
-         buffer[len] = 0;
-         printf( "Got message: %s\n", buffer );
-         send( sock_them, "pong", 4, 0 ); 
-         closesocket(sock_them);
+         int error = WSAGetLastError();
+         printf( "recvfrom error: %i, %i\n", recvd, error );
       }
     }
+
+    closesocket(sock);
+}
+
+class SpamHelper 
+{
+   public:
+      SOCKET sock;
+      char const *msg;
+};
+
+static bool SpamMessage( addrinfo *addr, void *user_arg ) 
+{
+   SpamHelper *helper = (SpamHelper*)user_arg;
+
+   int sent = sendto( helper->sock, helper->msg, strlen(helper->msg), 0, 
+      addr->ai_addr, addr->ai_addrlen );
+
+   char name[128];
+   GetAddressName( name, 128, addr->ai_addr );
+   printf( "Spammed %iB message to [%s]\n", sent, name );
+   if (sent <= 0) {
+      printf( "Error: %i\n", WSAGetLastError() );
+   }
+
+   return false;
 }
 
 //-------------------------------------------------------------------------------------------------------
-static void NetworkJoin( char const *addrname, char const *port, char const *msg )
+static void NetworkClient( char const *target, char const *port, char const *msg )
 {
-   SOCKET host_sock = INVALID_SOCKET;
+   char const *host_name = AllocLocalHostName();
+   SOCKET sock = BindAddress(host_name, gClientPort, AF_INET, SOCK_DGRAM);
+   FreeLocalHostName(host_name);
 
-   addrinfo *addr = AllocAddressesForHost( addrname, port, AF_UNSPEC, SOCK_STREAM, false );
-   ForEachAddress( addr, TryToConnect, &host_sock );
-   FreeAddresses(addr);
-
-
-   if (host_sock != INVALID_SOCKET) {
-      send( host_sock, msg, (int)strlen(msg), 0 ); 
-
-      char buffer[128];
-      int len = recv( host_sock, buffer, 128, 0 );
-      if (len > 0) {
-         buffer[len] = NULL;
-         printf( "Received response: %s\n", buffer );
-      }
-   } else {
-      printf( "Could not connect...\n" );
+   if (sock == INVALID_SOCKET) {
+      printf( "Could not bind adddress.\n" );
+      return;
    }
+   
+   SpamHelper helper;
+   helper.sock = sock;
+   helper.msg = msg;
 
-   closesocket( host_sock );
+   addrinfo *spam = AllocAddressesForHost( target, port, AF_UNSPEC, SOCK_DGRAM, false );
+   ForEachAddress( spam, SpamMessage, &helper ); 
+   FreeAddresses( spam );
+   
+   closesocket( sock );
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -219,20 +232,20 @@ int main( int argc, char const **argv )
 
    // List Addresses
    char const *hostname = AllocLocalHostName();
-   ListAddressesForHost( hostname, gPort );
+   ListAddressesForHost( hostname, gHostPort );
    FreeLocalHostName(hostname);
 
    // Host/Client Logic
-   if ((argc <= 1) || (_strcmpi( argv[1], "host" ) == 0)) {
+   if ((argc <= 1) || (_strcmpi( argv[1], "sock" ) == 0)) {
       printf( "Hosting...\n" );
-      NetworkHost( "localhost", gPort ); 
+      NetworkHost( gHostPort ); 
    } else if (argc > 2) {
       char const *addr = argv[1];
       char const *msg = argv[2];
       printf( "Sending message \"%s\" to [%s]\n", msg, addr );
-      NetworkJoin( addr, gPort, msg );
+      NetworkClient( addr, gHostPort, msg );
    } else {
-      printf( "Either past \"host\" or \"<addr> <msg>\"\n" );
+      printf( "Either past \"sock\" or \"<addr> <msg>\"\n" );
    }
 
    NetSystemDeinit();
