@@ -221,6 +221,44 @@ static void NetworkClient( char const *target, char const *port, char const *msg
    closesocket( sock );
 }
 
+static void NetworkBroadcast( char const *msg ) 
+{
+   SOCKET sock = socket( PF_INET, SOCK_DGRAM, IPPROTO_UDP );
+
+   sockaddr_in addr;
+   memset( &addr, 0, sizeof(addr) );
+
+   addr.sin_addr.S_un.S_addr = htonl(INADDR_ANY);
+   addr.sin_port = htons(0);
+   addr.sin_family = PF_INET;
+
+   int broadcast = 1;
+   int error = setsockopt( sock, SOL_SOCKET, SO_BROADCAST, (char*)&broadcast, sizeof(broadcast) );
+   if (error == SOCKET_ERROR) {
+      printf( "Failed to set broadcast. %u\n", WSAGetLastError() );
+      closesocket(sock);
+      return;
+   }
+
+   error = bind( sock, (sockaddr*)&addr, sizeof(addr) );
+   if (error == SOCKET_ERROR) {
+      printf( "Failed to bind broadcast. %u\n", WSAGetLastError() );
+      closesocket(sock);
+      return;
+   }
+
+
+   sockaddr_in out_addr;
+   memset( &out_addr, 0, sizeof(out_addr) );
+   out_addr.sin_addr.S_un.S_addr = htonl(-1);
+   out_addr.sin_port = htons(5413);
+   out_addr.sin_family = PF_INET;
+
+   int sent = sendto( sock, msg, strlen(msg), 0, (sockaddr*)&out_addr, sizeof(out_addr) );
+   printf( "Broadcast message: %i sent.\n", sent );
+   closesocket(sock);
+}
+
 //-------------------------------------------------------------------------------------------------------
 int main( int argc, char const **argv )
 {
@@ -245,7 +283,9 @@ int main( int argc, char const **argv )
       printf( "Sending message \"%s\" to [%s]\n", msg, addr );
       NetworkClient( addr, gHostPort, msg );
    } else {
-      printf( "Either past \"sock\" or \"<addr> <msg>\"\n" );
+      char const *msg = argv[1];
+      printf( "Broadcast message \"%s\".\n", msg );
+      NetworkBroadcast( msg );
    }
 
    NetSystemDeinit();
